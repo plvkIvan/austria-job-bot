@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 *.db
 .venv/
+.env.*
+!.env.example
+.idea/
+.vscode/
