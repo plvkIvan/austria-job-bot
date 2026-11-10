@@ -2,141 +2,178 @@
 from app.db.models import Job, User
 from app.matching.matcher import (
     evaluate_match,
+    location_matches,
     match_score,
+    should_notify_user,
 )
+
+
+def make_user(**overrides):
+    data = {
+        "query": "Lagerarbeiter",
+        "city": "Wien",
+        "employment": "vollzeit",
+        "german_level": "B2",
+    }
+
+    data.update(overrides)
+    return User(**data)
 
 
 def make_job(**overrides):
     data = {
         "source": "demo",
-        "external_id": "1",
-        "title": "Lagerarbeiter",
+        "external_id": "test-1",
+        "title": "Lagermitarbeiter",
         "city": "Wien",
         "url": "https://example.com/job/1",
+        "employment": "vollzeit",
+        "german_level": "B1",
     }
 
     data.update(overrides)
     return Job(**data)
 
 
-def test_exact_match_is_high():
-    user = User(
-        query="Lagerarbeiter",
-        city="Wien",
-        employment="vollzeit",
-        german_level="B2",
-    )
-
-    job = make_job(
-        employment="vollzeit",
-        german_level="B1",
-    )
+def test_perfect_match():
+    user = make_user()
+    job = make_job()
 
     result = evaluate_match(user, job)
 
-    assert result.score == 100
-    assert result.suitable
+    assert result.score == 100.0
+    assert result.rating == "high"
+    assert result.should_notify is True
+    assert result.profession_matches is True
+    assert result.location_matches is True
 
 
-def test_synonyms_and_three_languages():
-    user_en = User(
-        query="Warehouse worker",
-        city="Vienna",
-    )
+def test_low_score_does_not_block_notification():
+    """Main business rule."""
 
-    user_uk = User(
-        query="працівник складу",
-        city="Відень",
-    )
-
-    assert evaluate_match(
-        user_en, make_job()
-    ).score >= 90
-
-    assert evaluate_match(
-        user_uk, make_job()
-    ).suitable
-
-
-def test_mismatched_city_rejected():
-    user = User(
-        query="Lagerarbeiter",
-        city="Graz",
-    )
-
-    result = evaluate_match(user, make_job())
-
-    assert result.score == 0
-    assert not result.suitable
-
-
-def test_mismatched_employment_rejected():
-    user = User(
-        query="Lagerarbeiter",
+    user = make_user(
+        german_level="A2",
         employment="teilzeit",
     )
 
-    job = make_job(employment="vollzeit")
-
-    result = evaluate_match(user, job)
-
-    assert result.score == 0
-
-
-def test_german_requirement_rejected():
-    user = User(
-        query="Lagerarbeiter",
-        german_level="A2",
-    )
-
-    job = make_job(german_level="B2")
-
-    result = evaluate_match(user, job)
-
-    assert result.score == 0
-
-
-def test_missing_fields_are_explicit_not_assumed():
-    user = User(
-        query="Lagerarbeiter",
-        city="Wien",
+    job = make_job(
+        german_level="C1",
         employment="vollzeit",
     )
 
+    result = evaluate_match(user, job)
+
+    assert result.score < 65
+    assert result.should_notify is True
+    assert result.suitable is True
+    assert result.rating in {"low", "partial"}
+
+
+def test_wrong_city_blocks_notification():
+    user = make_user(city="Graz")
+    job = make_job(city="Wien")
+
+    result = evaluate_match(user, job)
+
+    assert result.location_matches is False
+    assert result.should_notify is False
+
+
+def test_wrong_profession_blocks_notification():
+    user = make_user(query="Java Developer")
+    job = make_job(title="Kellner")
+
+    result = evaluate_match(user, job)
+
+    assert result.profession_matches is False
+    assert result.should_notify is False
+
+
+def test_missing_location_blocks_notification():
+    user = make_user(city="Wien")
+    job = make_job(city="")
+
+    result = evaluate_match(user, job)
+
+    assert result.should_notify is False
+    assert "city" in result.missing_fields
+    assert "location_unknown" in result.reasons
+
+
+def test_missing_optional_details_do_not_block():
+    user = make_user()
+
     job = make_job(
-        city="",
         employment="",
         german_level="",
     )
 
     result = evaluate_match(user, job)
 
-    assert "city" in result.missing_fields
+    assert result.should_notify is True
     assert "employment" in result.missing_fields
     assert "job_german_level" in result.missing_fields
 
-    assert 0 < result.score < 100
 
-
-def test_unrelated_title_is_not_recommended():
-    user = User(
-        query="Java Developer",
-        city="Wien",
+def test_ukrainian_and_english_synonyms():
+    ukrainian_user = make_user(
+        query="працівник складу",
+        city="Відень",
     )
 
-    job = make_job(title="Kellner")
+    english_user = make_user(
+        query="Warehouse worker",
+        city="Vienna",
+    )
+
+    job = make_job()
+
+    assert should_notify_user(
+        ukrainian_user, job
+    ) is True
+
+    assert should_notify_user(
+        english_user, job
+    ) is True
+
+
+def test_vienna_is_not_wiener_neustadt():
+    assert location_matches(
+        "Wien", "Wien, Österreich"
+    ) is True
+
+    assert location_matches(
+        "Wien", "Wiener Neustadt"
+    ) is False
+
+
+def test_score_is_independent_of_notification():
+    user = make_user(german_level="A1")
+    job = make_job(german_level="C2")
 
     result = evaluate_match(user, job)
 
-    assert not result.suitable
+    assert result.score < 65
+    assert result.should_notify is True
+    assert match_score(user, job) == result.score
 
 
-def test_existing_match_score_api_still_works():
-    user = User(
-        query="Lagerarbeiter",
-        city="Wien",
+def test_unrestricted_city():
+    user = make_user(city="")
+    job = make_job(city="Graz")
+
+    assert should_notify_user(user, job) is True
+
+
+def test_threshold_no_longer_blocks():
+    user = make_user(german_level="A1")
+    job = make_job(german_level="C2")
+
+    result = evaluate_match(
+        user,
+        job,
+        threshold=99.0,
     )
 
-    assert match_score(
-        user, make_job()
-    ) >= 90
+    assert result.score < 99
+    assert result.should_notify is True
