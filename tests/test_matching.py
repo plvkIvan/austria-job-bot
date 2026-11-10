@@ -1,9 +1,28 @@
+
 from app.db.models import Job, User
-from app.matching.matcher import match_score
+from app.matching.matcher import evaluate_match, match_score
+
 
 def test_city_mismatch():
-    assert match_score(User(query='Lager', city='Wien'), Job(source='demo', external_id='1', title='Lager', company='', city='Graz', url='https://example.com')) == 0
+    user = User(query="Lager", city="Wien")
 
-def test_matching_title():
-    score = match_score(User(query='Lagerarbeiter', city='Wien'), Job(source='demo', external_id='1', title='Lagerarbeiter', company='', city='Wien', url='https://example.com'))
-    assert score >= 90
+    job = Job(
+        source="demo",
+        external_id="1",
+        title="Lager",
+        company="",
+        city="Graz",
+        url="https://example.com",
+    )
+
+    result = evaluate_match(user, job)
+
+    # Profession matches, but location does not.
+    assert result.profession_matches is True
+    assert result.location_matches is False
+
+    # The job must NOT be sent to this user.
+    assert result.should_notify is False
+
+    # The score is informational only.
+    assert match_score(user, job) == result.score
